@@ -1,0 +1,364 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8">
+    <title>JSDoc: Source: accountmanagement.js</title>
+
+    <script src="scripts/prettify/prettify.js"> </script>
+    <script src="scripts/prettify/lang-css.js"> </script>
+    <!--[if lt IE 9]>
+      <script src="//html5shiv.googlecode.com/svn/trunk/html5.js"></script>
+    <![endif]-->
+    <link type="text/css" rel="stylesheet" href="styles/prettify-tomorrow.css">
+    <link type="text/css" rel="stylesheet" href="styles/jsdoc-default.css">
+</head>
+
+<body>
+
+<div id="main">
+
+    <h1 class="page-title">Source: accountmanagement.js</h1>
+
+    
+
+
+
+    
+    <section>
+        <article>
+            <pre class="prettyprint source linenums"><code>var express = require('express');
+var router = express.Router();
+
+
+var FB = require('fb');
+
+
+
+
+
+
+
+/**
+ * Verifies if the user entered the correct verification code or not
+ * @param METHOD TYPE - POST
+ * @param DEPENDENCIES - mongoose
+ * @param {string} req.body.VerificationCode  - Pass the verification code from the user
+ * @param {string} req.body.FacebookUserId  - Passed back from login (/create) method. Used as auth token for user session
+ * @return Possible Messages: "Invalid FacebookUserId", "Correct Code", "Incorrect Code"
+ * 							  &lt;br>&lt;br>&lt;br>
+ * @name accounts/verifycode
+ * @function
+ */
+router.post('/verifycode', function (req, res) {
+	users.findOne({FacebookUserId: req.body.FacebookUserId}, function (err, data) {
+		if (err || data == null) {
+			res.send({
+	  			Type: "ERROR",
+	  			Message: "Invalid FacebookUserId",
+	  			Dependencies: ["mongoose"],
+	  			APICalled: "/accounts/resendemailverification",
+	  			ResponseDebugger: err
+	  		});
+		}
+		else if (req.body.VerificationCode == data.AccountSetup.TempEmailNumVerify) {
+			res.send({
+	  			Type: "SUCCESS",
+	  			Message: "Correct code",
+	  			Dependencies: ["mongoose"],
+	  			APICalled: "/accounts/resendemailverification",
+	  			ResponseDebugger: data
+	  		});
+		}
+		else {
+			res.send({
+	  			Type: "ERROR",
+	  			Message: "Incorrect code",
+	  			Dependencies: ["mongoose"],
+	  			APICalled: "/accounts/resendemailverification",
+	  			ResponseDebugger: err
+	  		});
+		}
+	});
+});
+
+
+
+/**
+ * Sends email verification with a code that the user can enter to get their account verified. It also verifies that the 
+ * user inputted a .edu email.
+ * @param METHOD TYPE - POST
+ * @param DEPENDENCIES - mongoose, emailjs
+ * @param {string} req.body.NewEmail  - .edu email of the user
+ * @param {string} req.body.FacebookUserId  - Passed back from login (/create) method. Used as auth token for user session
+ * @return Possible Messages: "Invalid Email Address. Must be .edu email address.", "Unable to change email and resend verification", 
+ *							  "User does not exist in the database. FacebookUserId must be invalid. ", "Email verification not successful.",
+ * 							  "User account successfully created. Verification email sent."
+ * 							  &lt;br>&lt;br>&lt;br>
+ * @name accounts/sendemailverification
+ * @function
+ */
+router.post('/sendemailverification', function (req, res) {
+	if (validateEmail(req.body.NewEmail) == false) {
+		res.send({
+  			Type: "ERROR",
+  			Message: "Invalid Email Address. Must be .edu email address.",
+  			Dependencies: [],
+  			APICalled: "/accounts/resendemailverification",
+  			ResponseDebugger: null
+  		})
+	}
+	else {
+		users.update({FacebookUserId: req.body.FacebookUserId}, {$set: {'UserData.Email' : req.body.NewEmail}}, function (err, up) {	
+
+			if (err || up.ok == 0 || up == null) {
+				res.send({
+	      			Type: "ERROR",
+	      			Message: "Unable to change email and resend verification",
+	      			Dependencies: [],
+	      			APICalled: "/accounts/resendemailverification",
+	      			ResponseDebugger: err
+	      		})
+			}
+			else  {
+				users.findOne({FacebookUserId: req.body.FacebookUserId}, function (err, data) {
+					if (err || data == null) {
+						res.send({
+			      			Type: "ERROR",
+			      			Message: "User does not exist in the database. FacebookUserId must be invalid. ",
+			      			Dependencies: [],
+			      			APICalled: "/accounts/resendemailverification",
+			      			ResponseDebugger: err
+			      		})
+					}
+					else {
+						var response = { 
+							name : data.UserData.Name,
+							email : req.body.Email
+						}
+						sendEmailVerification(response, data.AccountSetup.TempEmailNumVerify, res, function (err, answer) {
+							// SEE METHOD ITSELF FOR RESPONSE
+						});
+					}
+				});
+			}
+		});
+	}
+});
+
+
+
+
+
+/**
+ * First API called when generating a new user. Called once user authenticates with 
+ * Facebook. Must pass AccessToken in order to get user data.
+ * &lt;br>&lt;b> Also, if NOT "ERROR" Type of return, passes back FacebookUserId&lt;/b> This is used as auth token.
+ * @param METHOD TYPE - POST
+ * @param DEPENDENCIES - fb, emailjs, mongoose
+ * @param {string} req.body.AccessToken - Pass in the access token from the Facebook
+ *										  authentication to get user data from FB.
+ * @return Possible Messages: "Unable to Complete Facebook Login", "User has already created account and verified email", 
+ *							  "Could not successfully create account / save it in the database.",
+ *							  "User account successfully created and needs to verify email"
+ * 							  &lt;br>&lt;br>&lt;br>
+ * @name accounts/create
+ * @function
+ */
+router.post('/create', function(req, res) {
+
+	FB.setAccessToken(req.body.AccessToken);
+
+	FB.api('me', { fields: ['id', 'name', 'picture','email'] }, function (response) {
+
+    	if (!response || response.error) {
+      		res.send({
+      			Type: "ERROR",
+      			Message: "Unable to Complete Facebook Login",
+      			Dependencies: ["fb"],
+      			APICalled: "/accounts/create",
+      			ResponseDebugger: response
+      		})
+    	}
+
+
+    	else {
+    		var authnum = generateFourDigitNum();
+
+			var newuser = new users ({
+				AuthToken: req.body.AccessToken, 
+				FacebookUserId: response.id,
+				AccountSetup: {
+					HasVerifiedEmail: false,
+					TimeOfCreation: new Date(),
+					TempEmailNumVerify: authnum,
+				},
+				UserData: {
+					Name: response.name,
+					Email: response.email,
+					Picture: response.picture.url,
+				}
+			});
+
+
+			newuser.pre("save", function(next) {
+				users.findOne({"FacebookUserId" : response.id}, function (err, data) {
+					if (data == null)
+						next();
+					else  {
+						if (data.AccountSetup.HasVerifiedEmail == true)  {
+							res.send({
+				      			Type: "SUCCESS UNEXPECTED",
+				      			Message: "User has already created account and verified email",
+				      			Dependencies: [],
+				      			APICalled: "/accounts/create",
+				      			ResponseDebugger: {},
+				      			FacebookUserId: response.id
+				      		});
+						}
+						else {
+							res.send({
+				      			Type: "SUCCESS",
+				      			Message: "User has already created account BUT needs to verify email",
+				      			Dependencies: [],
+				      			APICalled: "/accounts/create",
+				      			ResponseDebugger: {},
+				      			FacebookUserId: response.id
+				      		});
+						}
+					}
+    			});
+			});
+
+
+			newuser.save(function (err) {
+				if (err) {
+					res.send({
+		      			Type: "ERROR",
+		      			Message: "Could not successfully create account / save it in the database.",
+		      			Dependencies: ["Mongoose"],
+		      			APICalled: "/accounts/create",
+		      			ResponseDebugger: err
+					});
+				}
+				else {
+					res.send({
+		      			Type: "SUCCESS",
+		      			Message: "User account successfully created and needs to verify email",
+		      			Dependencies: [],
+		      			APICalled: "/accounts/create",
+		      			ResponseDebugger: {},
+		      			FacebookUserId: response.id
+		      		});
+				}
+			});	
+
+    	}
+	});
+});
+
+
+function sendEmailVerification (response, authnum, res, callback) {
+	var emailbody = "This is your verification number " + authnum;
+	emailsend(emailbody,  emailbody, response.name, response.email, "Vendr Email Verification", function (err, data) {
+		if (err) {
+			res.send({
+      			Type: "ERROR",
+      			Message: "Email verification not successful.",
+      			Dependencies: ["EmailJS"],
+      			APICalled: "/accounts/create",
+      			ResponseDebugger: {
+      				Data1: err,
+      				Data2: data,
+      			}
+			});
+		}
+		else {
+			res.send({
+      			Type: "SUCCESS",
+      			Message: "User account successfully created. Verification email sent.",
+      			Dependencies: ["EmailJS"],
+      			APICalled: "/accounts/create",
+      			ResponseDebugger: {},
+      			FacebookUserId: response.id
+      		});
+		}
+	});
+}
+
+
+/* Valides to make sure user inputted an email and a .edu email, if not returns false */
+function validateEmail(email) {
+    var re = /^(([^&lt;>()[\]\\.,;:\s@"]+(\.[^&lt;>()[\]\\.,;:\s@"]+)*)|(".+"))@((\[[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}])|(([a-zA-Z\-0-9]+\.)+[a-zA-Z]{2,}))$/;
+    var result =  re.test(email);
+    if (email.indexOf(".edu") != -1)
+    	return result;
+    else 
+    	return false;
+}
+
+
+/* Sends an email with the following parameters. If error, then callback first parameter is not null, 
+	and second parameter has errro info.
+	If no error, first parameter callback is null, second parameter is info
+
+	callback(error, info)
+	READ ABOVE
+*/
+function emailsend (messagebody, messageattachment, toname, toemail, subject, callback) {
+	var mailOptions = {
+	    from: 'Prithvi Narasimhan &lt;prithvi@inqora.com>', // sender address
+	    to: toname + " &lt;" + toemail +  ">", // list of receivers
+	   	subject: subject,
+	    text: messagebody, // plaintext body
+	    html: messagebody // html body
+	}; 
+	if (subject != null)
+		mailOptions.subject = subject;
+
+	// send mail with defined transport object
+	transporter.sendMail(mailOptions, function(error, info){
+	    if(error){
+	        callback(error, info)
+	    }
+	    else{
+	        callback(null, info);
+	    }
+	});
+}
+
+
+/* Generates and returns a 4 digit number*/ 
+function generateFourDigitNum () {
+	var num = (parseInt(Math.random() * 9999) + 1000);
+	if (num > 10000)
+	    num -= 1000;
+	return num;
+}
+
+
+
+
+module.exports = router;
+</code></pre>
+        </article>
+    </section>
+
+
+
+
+</div>
+
+<nav>
+    <h2><a href="index.html">Home</a></h2><h3>Global</h3><ul><li><a href="global.html#accounts/create">accounts/create</a></li><li><a href="global.html#accounts/sendemailverification">accounts/sendemailverification</a></li><li><a href="global.html#accounts/verifycode">accounts/verifycode</a></li></ul>
+</nav>
+
+<br class="clear">
+
+<footer>
+    Documentation generated by <a href="https://github.com/jsdoc3/jsdoc">JSDoc 3.4.0</a> on Sun Feb 07 2016 15:09:00 GMT-0800 (PST)
+</footer>
+
+<script> prettyPrint(); </script>
+<script src="scripts/linenumber.js"> </script>
+</body>
+</html>
